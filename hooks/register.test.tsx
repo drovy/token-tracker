@@ -23,7 +23,7 @@ const USAGE = {
 }
 
 test('a turn adds to the session and all-time totals', async ($, on) => {
-  mock.store(on, { total: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, turns: 1 } })
+  mock.store(on, { total: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, turns: 1, costInput: 0, costOutput: 0, costCacheRead: 0, costCacheWrite: 0, unpriced: 0 } })
   mock.clock(on)
   on('command.register', () => ({ value: { command: 'tokens' } }))
   on('session.id', () => ({ value: 's1' }))
@@ -41,8 +41,8 @@ test('a turn adds to the session and all-time totals', async ($, on) => {
   for (const surface of ['terminal', 'desktop', 'vscode', 'mobile'] as const) {
     const ui = await $.ui.mount({ ...PANE, surface })
     expect((await ui.find({ type: 'Text', text: /^This session$/ }))?.text).toBe('This session')
-    expect((await ui.find({ type: 'Text', text: '1,350' }))?.text).toBe('1,350')
-    expect((await ui.find({ type: 'Text', text: '1,360' }))?.text).toBe('1,360')
+    expect((await ui.find({ type: 'Text', text: /1,350 tokens/ }))?.text).toBe('1,350 tokens · 1 turns')
+    expect((await ui.find({ type: 'Text', text: /1,360 tokens/ }))?.text).toBe('1,360 tokens · 2 turns')
     await ui.unmount()
   }
 })

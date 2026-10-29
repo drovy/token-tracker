@@ -5,29 +5,57 @@ import type { SessionTally, Tally } from '../types'
 
 const PANE = 'token-tracker'
 const MAX_SESSIONS = 500
-const EMPTY: Tally = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0 }
+const EMPTY: Tally = {
+  input: 0, output: 0, cacheRead: 0, cacheWrite: 0, turns: 0,
+  costInput: 0, costOutput: 0, costCacheRead: 0, costCacheWrite: 0, unpriced: 0,
+}
+
+// API list prices in dollars per million tokens: input, output, cache read,
+// cache write (5-minute TTL). Matched by substring of the model id; a model
+// not listed is counted in tokens but not priced.
+const RATES: { match: string; rate: [number, number, number, number] }[] = [
+  { match: 'fable-5-1', rate: [10, 50, 0.25, 12.5] },
+  { match: 'opus-5-5', rate: [4, 20, 0.2, 5] },
+  { match: 'sonnet-5-5', rate: [2, 10, 0.2, 2.5] },
+  { match: 'haiku-5-5', rate: [0.1, 0.5, 0.01, 0.125] },
+]
 
 const session = atom({ plugin: 'token-tracker', key: 'session' } as const, null, { shape: 'tally-1' })
 const total = atom({ plugin: 'token-tracker', key: 'total' } as const, EMPTY, { shape: 'tally-1' })
 const recent = atom({ plugin: 'token-tracker', key: 'recent' } as const, [], { shape: 'tally-1' })
 
 const PARTS = [
-  { field: 'input', label: 'Input', color: 'claude' },
-  { field: 'output', label: 'Output', color: 'success' },
-  { field: 'cacheRead', label: 'Cache read', color: 'suggestion' },
-  { field: 'cacheWrite', label: 'Cache write', color: 'warning' },
+  { field: 'input', costField: 'costInput', label: 'Input', color: 'claude' },
+  { field: 'output', costField: 'costOutput', label: 'Output', color: 'success' },
+  { field: 'cacheRead', costField: 'costCacheRead', label: 'Cache read', color: 'suggestion' },
+  { field: 'cacheWrite', costField: 'costCacheWrite', label: 'Cache write', color: 'warning' },
 ] as const
 
 const sum = (t: Tally) => t.input + t.output + t.cacheRead + t.cacheWrite
+const cost = (t: Tally) => t.costInput + t.costOutput + t.costCacheRead + t.costCacheWrite
 
-const add = <T extends Tally>(t: T, u: TurnUsage): T => ({
-  ...t,
-  input: t.input + u.input_tokens,
-  output: t.output + u.output_tokens,
-  cacheRead: t.cacheRead + u.cache_read_input_tokens,
-  cacheWrite: t.cacheWrite + u.cache_creation_input_tokens,
-  turns: t.turns + 1,
-})
+const usd = (n: number) =>
+  n > 0 && n < 0.01 ? '<$0.01' : `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+
+const add = <T extends Tally>(t: T, u: TurnUsage): T => {
+  const rate = RATES.find(r => u.model.includes(r.match))?.rate
+  const price = (tokens: number, perMillion: number) => (tokens * perMillion) / 1e6
+  const all = u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
+
+  return {
+    ...t,
+    input: t.input + u.input_tokens,
+    output: t.output + u.output_tokens,
+    cacheRead: t.cacheRead + u.cache_read_input_tokens,
+    cacheWrite: t.cacheWrite + u.cache_creation_input_tokens,
+    turns: t.turns + 1,
+    costInput: t.costInput + (rate ? price(u.input_tokens, rate[0]) : 0),
+    costOutput: t.costOutput + (rate ? price(u.output_tokens, rate[1]) : 0),
+    costCacheRead: t.costCacheRead + (rate ? price(u.cache_read_input_tokens, rate[2]) : 0),
+    costCacheWrite: t.costCacheWrite + (rate ? price(u.cache_creation_input_tokens, rate[3]) : 0),
+    unpriced: t.unpriced + (rate ? 0 : all),
+  }
+}
 
 const fmt = (n: number) =>
   n >= 1e9 ? `${(n / 1e9).toFixed(2)}B`
@@ -42,7 +70,7 @@ const asSessions = (v: unknown): Record<string, SessionTally> =>
 async function refresh($: EngineInterface) {
   const s = await read($, session)
   const t = await read($, total)
-  $.ui.status(`Tokens: ${fmt(s ? sum(s) : 0)} session · ${fmt(sum(t))} all-time`)
+  $.ui.status(`${usd(s ? cost(s) : 0)} session · ${usd(cost(t))} all-time · ${fmt(s ? sum(s) : 0)} tokens`)
 }
 
 // Loads persisted totals and this session's entry (if resumed) into state.
@@ -116,7 +144,7 @@ export const register: Register = on => {
     const t = await read($, total)
 
     return {
-      text: `This session: ${(s ? sum(s) : 0).toLocaleString()} tokens. All time: ${sum(t).toLocaleString()} tokens.`,
+      text: `This session: ${usd(s ? cost(s) : 0)} (${(s ? sum(s) : 0).toLocaleString()} tokens). All time: ${usd(cost(t))} (${sum(t).toLocaleString()} tokens). API list prices.`,
     }
   })
 
@@ -136,14 +164,16 @@ export const register: Register = on => {
       </Box>
     )
 
-    // One coloured segment per category, sized by its share of the total.
+    // One coloured segment per category, sized by its share of the cost
+    // (or of the tokens, when nothing is priced yet).
     const bar = (x: Tally) => {
-      const all = sum(x)
+      const byCost = cost(x) > 0
+      const all = byCost ? cost(x) : sum(x)
       if (all === 0) return <Text color="subtle">{'─'.repeat(barWidth)}</Text>
       return (
         <Box flexDirection="row">
           {PARTS.map(p => {
-            const n = Math.round((x[p.field] / all) * barWidth)
+            const n = Math.round(((byCost ? x[p.costField] : x[p.field]) / all) * barWidth)
             return n > 0 ? <Text color={p.color}>{'━'.repeat(n)}</Text> : null
           })}
         </Box>
@@ -153,16 +183,19 @@ export const register: Register = on => {
     const tally = (key: string, title: string, x: Tally) => card(key, title, (
       <Box flexDirection="column">
         <Box flexDirection="row" justifyContent="space-between">
-          <Text bold size="title">{sum(x).toLocaleString()}</Text>
-          <Text color="subtle">{x.turns} turns</Text>
+          <Text bold size="title">{usd(cost(x))}</Text>
+          <Text color="subtle">{sum(x).toLocaleString()} tokens · {x.turns} turns</Text>
         </Box>
         {bar(x)}
         {PARTS.map(p => (
           <Box flexDirection="row" justifyContent="space-between">
             <Text><Text color={p.color}>●</Text> <Text color="subtle">{p.label}</Text></Text>
-            <Text tabular>{x[p.field].toLocaleString()}</Text>
+            <Text tabular>{x[p.field].toLocaleString()} · {usd(x[p.costField])}</Text>
           </Box>
         ))}
+        {x.unpriced > 0 && (
+          <Text color="warning">{x.unpriced.toLocaleString()} tokens from models with no known price are not in the cost</Text>
+        )}
       </Box>
     ))
 
@@ -180,12 +213,15 @@ export const register: Register = on => {
                   <Text color={isMine ? 'claude' : 'subtle'} wrap="truncate-end">
                     {isMine ? '▸ ' : '  '}{one.cwd.split(/[\\/]/).pop()} · {new Date(one.updatedAt).toLocaleDateString()}
                   </Text>
-                  <Text tabular bold={isMine}>{fmt(sum(one))}</Text>
+                  <Text tabular bold={isMine}>{usd(cost(one))}</Text>
                 </Box>
               )
             })}
           </Box>
         ))}
+        <Text color="subtle" wrap="wrap">
+          API list prices with 5-minute cache writes. A subscription isn't billed per token, so this is what the same use would cost on the API. Cost counts from when this version was installed.
+        </Text>
       </Box>
     )
   })

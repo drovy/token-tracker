@@ -4,6 +4,11 @@ export type Tally = {
   cacheRead: number
   cacheWrite: number
   turns: number
+  costInput: number
+  costOutput: number
+  costCacheRead: number
+  costCacheWrite: number
+  unpriced: number
 }
 
 export type SessionTally = Tally & {
