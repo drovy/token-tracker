@@ -1,0 +1,19 @@
+# token-tracker
+
+A Claude Code mod that keeps count of the tokens you use, for the current session and across every session you have ever run.
+
+- **Status line:** `Tokens: 12.3k session · 4.56M all-time`, updated after every turn.
+- **`/tokens` command:** opens a pane with three bubbles: this session, all time, and your recent sessions. Each total is split into input, output, cache read and cache write tokens.
+- Totals are saved in the mod's own store on your machine, so they survive restarts. Nothing is sent anywhere.
+
+## Install
+
+At the prompt of a terminal Claude Code session:
+
+```
+/plugin install token-tracker --marketplace drovy/token-tracker
+```
+
+Answer `y` to add the marketplace, then pick a scope (user scope loads it in every session). In the desktop app, click + next to the prompt box, then Plugins, Add marketplace with `drovy/token-tracker`, then Add plugin.
+
+Counting starts when the mod loads; tokens used before that are not included.
