@@ -32,18 +32,22 @@ const PARTS = [
 ] as const
 
 const sum = (t: Tally) => t.input + t.output + t.cacheRead + t.cacheWrite
-const cost = (t: Tally) => t.costInput + t.costOutput + t.costCacheRead + t.costCacheWrite
+const cost = (t: Tally) =>
+  (t.costInput || 0) + (t.costOutput || 0) + (t.costCacheRead || 0) + (t.costCacheWrite || 0)
 
-const usd = (n: number) =>
-  n > 0 && n < 0.01 ? '<$0.01' : `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+const usd = (raw: number | undefined) => {
+  const n = raw || 0
+  return n > 0 && n < 0.01 ? '<$0.01' : `$${n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`
+}
 
-const add = <T extends Tally>(t: T, u: TurnUsage): T => {
+const add = <T extends Tally>(old: T, u: TurnUsage): T => {
+  const t = { ...EMPTY, ...old }
   const rate = RATES.find(r => u.model.includes(r.match))?.rate
   const price = (tokens: number, perMillion: number) => (tokens * perMillion) / 1e6
   const all = u.input_tokens + u.output_tokens + u.cache_read_input_tokens + u.cache_creation_input_tokens
 
   return {
-    ...t,
+    ...old,
     input: t.input + u.input_tokens,
     output: t.output + u.output_tokens,
     cacheRead: t.cacheRead + u.cache_read_input_tokens,
@@ -180,7 +184,9 @@ export const register: Register = on => {
       )
     }
 
-    const tally = (key: string, title: string, x: Tally) => card(key, title, (
+    const tally = (key: string, title: string, raw: Tally) => {
+      const x = { ...EMPTY, ...raw }
+      return card(key, title, (
       <Box flexDirection="column">
         <Box flexDirection="row" justifyContent="space-between">
           <Text bold size="title">{usd(cost(x))}</Text>
@@ -197,7 +203,8 @@ export const register: Register = on => {
           <Text color="warning">{x.unpriced.toLocaleString()} tokens from models with no known price are not in the cost</Text>
         )}
       </Box>
-    ))
+      ))
+    }
 
     return (
       <Box flexDirection="column">
