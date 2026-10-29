@@ -104,6 +104,23 @@ export const register: Register = on => {
     return next(e)
   })
 
+  // The status line is per chat, so redraw it whenever a chat becomes active
+  // again, not only when its session starts or a turn finishes.
+  on('turn.start', async ($, e, next) => {
+    await load($)
+    return next(e)
+  })
+
+  on('session.attach', async ($, e, next) => {
+    await load($)
+    return next(e)
+  })
+
+  on('session.measure', async ($, e, next) => {
+    await refresh($)
+    return next(e)
+  })
+
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     const usage = e.usage
