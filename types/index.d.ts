@@ -24,6 +24,18 @@ export type SyncInfo = {
   error?: string
 }
 
+export type Mood =
+  | 'idle' | 'thinking' | 'reading' | 'editing' | 'running' | 'browsing'
+  | 'helpers' | 'asking' | 'tinkering' | 'oops' | 'happy' | 'loved' | 'sleepy'
+
+export type Pet = {
+  mood: Mood
+  note: string
+  since: number
+  frame: number
+  steps: number
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'token-tracker': {
@@ -31,6 +43,7 @@ declare module 'claude-code' {
       total: Shaped<Tally>
       recent: Shaped<SessionTally[]>
       sync: Shaped<SyncInfo | null>
+      pet: Shaped<Pet>
     }
   }
 }

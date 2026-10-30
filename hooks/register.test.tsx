@@ -30,7 +30,7 @@ function engine(on: On, env: Record<string, string>, files: Record<string, strin
   const opened: string[] = []
   const norm = (p: string) => p.replace(/\\/g, '/')
   mock.store(on, { total })
-  mock.clock(on)
+  const clock = mock.clock(on)
   mock.env(on, env)
   on('command.register', () => ({ value: { command: 'tokens' } }))
   on('session.id', () => ({ value: 's1' }))
@@ -50,7 +50,7 @@ function engine(on: On, env: Record<string, string>, files: Record<string, strin
   }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('turn.complete', () => ({ text: 'hi' }))
-  return { opened, files, statuses }
+  return { opened, files, statuses, clock }
 }
 
 const start = ($: Parameters<Parameters<typeof test>[1]>[0]) =>
@@ -114,4 +114,43 @@ test('usage shows in the status line before any turn or /tokens', async ($, on) 
   const { statuses } = engine(on, {}, {}, { ...TOTAL, costInput: 1.5 })
   await start($)
   expect(statuses.at(-1)).toBe('$0.00 session · $1.50 all-time · 0 tokens')
+})
+
+const pet = async (ui: Awaited<ReturnType<Parameters<Parameters<typeof test>[1]>[0]['ui']['mount']>>) =>
+  (await ui.find({ type: 'Text', text: /^\s*\( / }))?.text?.trim()
+
+test('Clawd acts out what Claude is doing', async ($, on) => {
+  engine(on, {})
+  const seen: (string | undefined)[] = []
+  let ui: Awaited<ReturnType<typeof $.ui.mount>>
+  on('tool.call', async (_, e) => {
+    seen.push(await pet(ui))
+    return (e.tool === 'Bash' ? { deny: 'not allowed' } : { result: 'ok' }) as never
+  })
+  await start($)
+  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+
+  await $.tool.call({ tool: 'Read', file_path: 'C:/proj/src/app.ts' } as never)
+  await $.tool.call({ tool: 'Edit', file_path: 'C:/proj/src/app.ts', old_string: 'a', new_string: 'b' } as never)
+  expect(await pet(ui)).toBe('( hmm. )')
+  await $.tool.call({ tool: 'Bash', command: 'npm test' } as never)
+  expect(seen).toEqual(['( reading app.ts )', '( editing app.ts )', '( running npm test )'])
+  expect(await pet(ui)).toBe('( oops! Bash )')
+
+  await turn($)
+  expect(await pet(ui)).toBe('( done! +1.4k tokens )')
+  await ui.unmount()
+})
+
+test('petting Clawd makes it happy, then it settles and naps', async ($, on) => {
+  const { clock } = engine(on, {})
+  await start($)
+  const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  await ui.press({ key: 'pet-clawd' })
+  expect(await pet(ui)).toBe('( ♥ ♥ ♥ )')
+  await clock.advance(6000)
+  expect(await pet(ui)).toBeUndefined()
+  await clock.advance(130_000)
+  expect(await pet(ui)).toMatch(/^\( z/)
+  await ui.unmount()
 })

@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register, TurnUsage } from 'claude-code'
+import type { EngineInterface, Register, Timer, TurnUsage } from 'claude-code'
 
-import type { SessionTally, SyncInfo, Tally } from '../types'
+import type { Mood, Pet, SessionTally, SyncInfo, Tally } from '../types'
 
 const PANE = 'token-tracker'
 const MAX_SESSIONS = 500
@@ -24,6 +24,8 @@ const session = atom({ plugin: 'token-tracker', key: 'session' } as const, null,
 const total = atom({ plugin: 'token-tracker', key: 'total' } as const, EMPTY, { shape: 'tally-1' })
 const recent = atom({ plugin: 'token-tracker', key: 'recent' } as const, [], { shape: 'tally-1' })
 const sync = atom({ plugin: 'token-tracker', key: 'sync' } as const, null, { shape: 'sync-1' })
+const pet = atom({ plugin: 'token-tracker', key: 'pet' } as const,
+  { mood: 'idle', note: '', since: 0, frame: 0, steps: 0 } as Pet, { shape: 'pet-1' })
 
 const PARTS = [
   { field: 'input', costField: 'costInput', label: 'Input', color: 'claude' },
@@ -172,6 +174,97 @@ async function load($: EngineInterface) {
   await refresh($)
 }
 
+// Clawd, the Claude crab, lives at the top of the pane and acts out what
+// Claude is doing. One timer moves the animation on and lets moods wear off.
+const TICK = 600
+const SETTLE = 5000
+const DOZE = 120_000
+
+const TOOLS: [RegExp, Mood][] = [
+  [/^(Read|Grep|Glob|LS|NotebookRead)$/, 'reading'],
+  [/^(Edit|MultiEdit|Write|NotebookEdit)$/, 'editing'],
+  [/^(Bash|PowerShell|Monitor)$/, 'running'],
+  [/^(WebFetch|WebSearch)$|browser|chrome/i, 'browsing'],
+  [/^(Agent|Task|Workflow)$/, 'helpers'],
+  [/^AskUserQuestion$/, 'asking'],
+]
+const WALKS: Mood[] = ['running', 'browsing', 'happy']
+const FADES: Mood[] = ['happy', 'oops', 'loved']
+
+const short = (s: string, n = 22) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
+
+// A few words on what a tool call is about: a file's name, a command, a URL.
+function about(e: Record<string, unknown>): string {
+  const path = e.file_path ?? e.notebook_path ?? e.path
+  if (typeof path === 'string') return short(path.split(/[\\/]/).pop() || path)
+  for (const field of ['command', 'pattern', 'url', 'query', 'description']) {
+    const v = e[field]
+    if (typeof v === 'string') return short(v.split('\n')[0].replace(/^https?:\/\//, ''))
+  }
+  return ''
+}
+
+async function feel($: EngineInterface, mood: Mood, note = '') {
+  const since = await $.clock.now()
+  await update($, pet, p => ({ ...p, mood, note, since }))
+}
+
+let ticker: Timer | undefined
+
+async function tick($: EngineInterface) {
+  const now = await $.clock.now()
+  await update($, pet, p => {
+    const age = now - p.since
+    const mood: Mood = FADES.includes(p.mood) && age > SETTLE ? 'idle'
+      : p.mood === 'idle' && age > DOZE ? 'sleepy'
+      : p.mood
+    const walks = WALKS.includes(mood) || (mood === 'idle' && p.frame % 4 === 0)
+    return {
+      ...p,
+      ...(mood !== p.mood && { mood, note: '', since: now }),
+      frame: p.frame + 1,
+      steps: p.steps + (walks ? 1 : 0),
+    }
+  })
+}
+
+const EYES = { open: ' ▐▛███▜▌ ', shut: ' ▐█████▌ ' }
+const ARMS = { down: '▝▜█████▛▘', up: '▗▟█████▙▖' }
+const LEGS = ['  ▘▘ ▝▝  ', '  ▝▘ ▘▝  ']
+
+// What Clawd looks like and says in a mood, on a frame of the animation.
+function pose(p: Pet) {
+  const f = p.frame
+  const flip = f % 2 === 0
+  const blink = f % 7 === 0
+  const dots = '.'.repeat((f % 3) + 1)
+  const note = p.note ? ` ${p.note}` : ''
+  const look = (eyes: keyof typeof EYES, arms: keyof typeof ARMS, legs: number, say: string) =>
+    ({ rows: [EYES[eyes], ARMS[arms], LEGS[legs]], say })
+  switch (p.mood) {
+    case 'thinking': return look(blink ? 'shut' : 'open', 'down', 0, `hmm${dots}`)
+    case 'reading': return look(blink ? 'shut' : 'open', 'down', 0, `reading${note}`)
+    case 'editing': return look('open', flip ? 'up' : 'down', 0, `editing${note}`)
+    case 'running': return look('open', 'down', flip ? 0 : 1, `running${note}`)
+    case 'browsing': return look('open', 'down', flip ? 0 : 1, `surfing${note}`)
+    case 'helpers': return look('open', flip ? 'up' : 'down', 0, `calling helpers${dots}`)
+    case 'asking': return look('open', 'up', 0, 'your turn!')
+    case 'tinkering': return look('open', flip ? 'up' : 'down', 0, `using${note}`)
+    case 'oops': return look(flip ? 'shut' : 'open', 'down', 0, `oops!${note}`)
+    case 'happy': return look('open', flip ? 'up' : 'down', flip ? 0 : 1, `done!${note}`)
+    case 'loved': return look('shut', 'up', 0, '♥ ♥ ♥')
+    case 'sleepy': return look('shut', 'down', 0, ['z', 'zZ', 'zZz'][f % 3])
+    default: return look(blink ? 'shut' : 'open', 'down', 0, '')
+  }
+}
+
+// Back and forth across the pane: a step count folded into 0…room.
+const pace = (steps: number, room: number) => {
+  if (room <= 0) return 0
+  const k = steps % (2 * room)
+  return k <= room ? k : 2 * room - k
+}
+
 export const register: Register = (on, options) => {
   syncSetting = typeof options.syncFolder === 'string' ? options.syncFolder : ''
 
@@ -182,6 +275,8 @@ export const register: Register = (on, options) => {
     })
     void $.ui.open({ id: PANE, title: 'Token usage' })
     await load($)
+    ticker?.cancel()
+    ticker = $.clock.every(TICK, () => void tick($))
 
     return next(e)
   })
@@ -190,7 +285,17 @@ export const register: Register = (on, options) => {
   // again, not only when its session starts or a turn finishes.
   on('turn.start', async ($, e, next) => {
     await load($)
+    await feel($, 'thinking')
     return next(e)
+  })
+
+  on('tool.call', async ($, e, next) => {
+    const mood = TOOLS.find(([match]) => match.test(e.tool))?.[1] ?? 'tinkering'
+    await feel($, mood, mood === 'tinkering' ? short(e.tool.replace(/^mcp__[^_]+__/, '')) : about(e as never))
+    const result = await next(e)
+    if (result.deny !== undefined || result.isError) await feel($, 'oops', short(e.tool))
+    else if (mood !== 'asking') await feel($, 'thinking')
+    return result
   })
 
   on('session.attach', async ($, e, next) => {
@@ -206,6 +311,8 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     const usage = e.usage
+    if (e.isAborted) await feel($, 'oops', 'stopped')
+    else await feel($, 'happy', usage ? `+${fmt(usage.input_tokens + usage.output_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens)} tokens` : '')
     if (!usage) return result
 
     const id = await $.session.id()
@@ -250,8 +357,9 @@ export const register: Register = (on, options) => {
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
-    const { Box, Text } = $.ui.resolve(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
     const s = await read($, session)
+    const clawd = await read($, pet)
     const t = await read($, total)
     const list = await read($, recent)
     const synced = await read($, sync)
@@ -304,8 +412,19 @@ export const register: Register = (on, options) => {
       ))
     }
 
+    const look = pose(clawd)
+    const x = pace(clawd.steps, Math.max(0, (e.props.bodyColumns ?? 40) - 12))
+    const home = (
+      <Box key="pet" flexDirection="column" marginBottom={1}>
+        <Text color="subtle" wrap="truncate-end">{look.say ? `${' '.repeat(Math.max(0, x - 1))}( ${look.say} )` : ' '}</Text>
+        {look.rows.map(row => <Text color="claude">{' '.repeat(x)}{row}</Text>)}
+        <Button key="pet-clawd" plain label="pet Clawd" onPress={() => void feel($, 'loved')} />
+      </Box>
+    )
+
     return (
       <Box flexDirection="column">
+        {home}
         {tally('session', 'This session', s ?? EMPTY)}
         {tally('total', synced && synced.devices.length > 1 ? `All time · ${synced.devices.length} computers` : 'All time', t)}
         {card('recent', 'Recent sessions', (
