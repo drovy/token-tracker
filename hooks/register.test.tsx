@@ -26,10 +26,10 @@ const USAGE = {
 const TOTAL = { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, turns: 1, costInput: 0, costOutput: 0, costCacheRead: 0, costCacheWrite: 0, unpriced: 0 }
 
 // The engine beneath the mod: an in-memory disk, and a record of opened panes.
-function engine(on: On, env: Record<string, string>, files: Record<string, string> = {}) {
+function engine(on: On, env: Record<string, string>, files: Record<string, string> = {}, total = TOTAL) {
   const opened: string[] = []
   const norm = (p: string) => p.replace(/\\/g, '/')
-  mock.store(on, { total: TOTAL })
+  mock.store(on, { total })
   mock.clock(on)
   mock.env(on, env)
   on('command.register', () => ({ value: { command: 'tokens' } }))
@@ -110,15 +110,8 @@ test('totals sync with the other computer through OneDrive', async ($, on) => {
 })
 
 test('the usage band shows above the prompt before any turn or /tokens', async ($, on) => {
-  mock.store(on, { total: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, turns: 1, costInput: 1.5, costOutput: 0, costCacheRead: 0, costCacheWrite: 0, unpriced: 0 } })
-  mock.clock(on)
-  on('command.register', () => ({ value: { command: 'tokens' } }))
-  on('session.id', () => ({ value: 's1' }))
-  on('session.cwd', () => ({ value: '/proj' }))
-  on('ui.status', () => ({ value: undefined }))
-  on('session.start', (_, e) => ({ cwd: e.cwd }))
-
-  await $.session.start({ cwd: '/proj', surface: 'desktop', isInteractive: true })
+  engine(on, {}, {}, { ...TOTAL, costInput: 1.5 })
+  await start($)
 
   const ui = await $.ui.mount({
     plugin: 'token-tracker', component: 'AbovePrompt', surface: 'desktop',
