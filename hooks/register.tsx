@@ -72,14 +72,10 @@ const asTally = (v: unknown): Tally => ({ ...EMPTY, ...(v as Partial<Tally> | un
 const asSessions = (v: unknown): Record<string, SessionTally> =>
   v && typeof v === 'object' ? (v as Record<string, SessionTally>) : {}
 
-async function line($: EngineInterface) {
+async function refresh($: EngineInterface) {
   const s = await read($, session)
   const t = await read($, total)
-  return `${usd(s ? cost(s) : 0)} session · ${usd(cost(t))} all-time · ${fmt(s ? sum(s) : 0)} tokens`
-}
-
-async function refresh($: EngineInterface) {
-  $.ui.status(await line($))
+  $.ui.status(`${usd(s ? cost(s) : 0)} session · ${usd(cost(t))} all-time · ${fmt(s ? sum(s) : 0)} tokens`)
 }
 
 type DeviceFile = { device: string; updatedAt: number; total: Tally; sessions: SessionTally[] }
@@ -251,20 +247,6 @@ export const register: Register = (on, options) => {
     return {
       text: `This session: ${usd(s ? cost(s) : 0)} (${(s ? sum(s) : 0).toLocaleString()} tokens). All time: ${usd(cost(t))} (${sum(t).toLocaleString()} tokens). API list prices.`,
     }
-  })
-
-  // Always-on usage line by the prompt, so it shows without running /tokens.
-  // The terminal draws it at the end of the hint line under the prompt; the
-  // other surfaces don't draw that tail, so they get the band above instead.
-  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
-    if (e.surface !== 'terminal') return next(e)
-    return next({ ...e, props: { ...e.props, tail: `· ${await line($)}` } })
-  })
-
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.surface === 'terminal' || e.props.hasSurvey) return next(e)
-    const { Text } = $.ui.resolve(e)
-    return <Text color="subtle">Tokens: {await line($)}</Text>
   })
 
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {

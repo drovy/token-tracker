@@ -35,7 +35,8 @@ function engine(on: On, env: Record<string, string>, files: Record<string, strin
   on('command.register', () => ({ value: { command: 'tokens' } }))
   on('session.id', () => ({ value: 's1' }))
   on('session.cwd', () => ({ value: '/proj' }))
-  on('ui.status', () => ({ value: undefined }))
+  const statuses: (string | undefined)[] = []
+  on('ui.status', (_, e) => (statuses.push(e.text), { value: undefined }))
   on('ui.open', (_, e) => (opened.push(e.id), { value: { isPlaced: true } }))
   on('fs.write', (_, e) => ((files[norm(e.path)] = e.text), { value: undefined }))
   on('fs.read', (_, e) => {
@@ -49,7 +50,7 @@ function engine(on: On, env: Record<string, string>, files: Record<string, strin
   }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('turn.complete', () => ({ text: 'hi' }))
-  return { opened, files }
+  return { opened, files, statuses }
 }
 
 const start = ($: Parameters<Parameters<typeof test>[1]>[0]) =>
@@ -109,15 +110,8 @@ test('totals sync with the other computer through OneDrive', async ($, on) => {
   }
 })
 
-test('the usage band shows above the prompt before any turn or /tokens', async ($, on) => {
-  engine(on, {}, {}, { ...TOTAL, costInput: 1.5 })
+test('usage shows in the status line before any turn or /tokens', async ($, on) => {
+  const { statuses } = engine(on, {}, {}, { ...TOTAL, costInput: 1.5 })
   await start($)
-
-  const ui = await $.ui.mount({
-    plugin: 'token-tracker', component: 'AbovePrompt', surface: 'desktop',
-    props: { hasSurvey: false, isWorking: false, maxRows: 10, scroll: { offset: 0, bodyRows: 10 } },
-  } as never)
-  expect((await ui.find({ type: 'Text', text: /all-time/ }))?.text)
-    .toBe('Tokens: $0.00 session · $1.50 all-time · 0 tokens')
-  await ui.unmount()
+  expect(statuses.at(-1)).toBe('$0.00 session · $1.50 all-time · 0 tokens')
 })
