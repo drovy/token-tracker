@@ -2,7 +2,7 @@
 
 A Claude Code mod that keeps count of the tokens you use, for the current session and across every session you have ever run.
 
-- **Status line:** `Tokens: 12.3k session · 4.56M all-time`, updated after every turn.
+- **By the prompt, always on:** `$0.44 session · $1.91 all-time · 1.50M tokens`, from the moment a chat opens and after every turn. The terminal shows it at the end of the hint line under the prompt; the desktop app shows it in the band just above the prompt.
 - **`/tokens` command:** opens a pane with three bubbles: this session, all time, and your recent sessions. Each total is split into input, output, cache read and cache write tokens.
 - Totals are saved in the mod's own store on your machine, so they survive restarts. Nothing is sent anywhere.
 

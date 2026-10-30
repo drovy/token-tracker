@@ -46,3 +46,23 @@ test('a turn adds to the session and all-time totals', async ($, on) => {
     await ui.unmount()
   }
 })
+
+test('the usage band shows above the prompt before any turn or /tokens', async ($, on) => {
+  mock.store(on, { total: { input: 10, output: 0, cacheRead: 0, cacheWrite: 0, turns: 1, costInput: 1.5, costOutput: 0, costCacheRead: 0, costCacheWrite: 0, unpriced: 0 } })
+  mock.clock(on)
+  on('command.register', () => ({ value: { command: 'tokens' } }))
+  on('session.id', () => ({ value: 's1' }))
+  on('session.cwd', () => ({ value: '/proj' }))
+  on('ui.status', () => ({ value: undefined }))
+  on('session.start', (_, e) => ({ cwd: e.cwd }))
+
+  await $.session.start({ cwd: '/proj', surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({
+    plugin: 'token-tracker', component: 'AbovePrompt', surface: 'desktop',
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, scroll: { offset: 0, bodyRows: 10 } },
+  } as never)
+  expect((await ui.find({ type: 'Text', text: /all-time/ }))?.text)
+    .toBe('Tokens: $0.00 session · $1.50 all-time · 0 tokens')
+  await ui.unmount()
+})
