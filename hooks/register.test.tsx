@@ -164,14 +164,14 @@ test('Clawd hops onto the row of each tool as it runs', async ($, on) => {
   expect(await pet(home)).toBe('( done! +1.4k tokens )')
 })
 
-test('Clawd watches the person type under the text box', async ($, on) => {
+test('Clawd sits on the text box on desktop and watches the person type', async ($, on) => {
   engine(on, {})
   on('prompt.edit', (_, e) => {
     const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
     return { text, cursor: e.start + e.inputText.length } as never
   })
   await start($)
-  const home = await hint($, 'desktop')
+  const home = await site($, 'AbovePrompt', 'band', { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, viewport: { columns: 85, rows: 40 } }, 'desktop')
   const type = (text: string, inputText: string) =>
     ($ as unknown as { prompt: { edit: (e: object) => Promise<unknown> } }).prompt.edit({
       origin: { kind: 'person' }, text, cursor: text.length, start: text.length, end: text.length, inputText,

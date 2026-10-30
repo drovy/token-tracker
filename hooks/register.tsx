@@ -499,6 +499,18 @@ export const register: Register = (on, options) => {
     )
   })
 
+  // The desktop app draws no hint line, so there Clawd perches on the top
+  // edge of the text box instead: one small row at its right end.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.surface === 'terminal' || e.props.hasSurvey || (await read($, spot)).site !== 'prompt') return next(e)
+    const { Box } = $.ui.resolve(e)
+    return (
+      <Box flexDirection="row" justifyContent="flex-end" alignItems="flex-end">
+        {perch($, e, pose(await read($, pet)))}
+      </Box>
+    )
+  })
+
   on('ui.render', { component: 'UserMessage' }, ($, e, next) => sit($, e, next as never))
   on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => sit($, e, next as never))
   on('ui.render', { component: 'CommandOutput' }, ($, e, next) => sit($, e, next as never))
