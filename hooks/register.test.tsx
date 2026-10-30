@@ -138,7 +138,7 @@ const toolRow = ($: Kit, id: string, tool: string) =>
   site($, 'ToolUse', id, { tool, input: {}, isRunning: true, isErrored: false, isInterrupted: false, isExpanded: false })
 
 test('Clawd hops onto the row of each tool as it runs', async ($, on) => {
-  engine(on, {})
+  const { clock } = engine(on, {})
   const seen: (string | undefined)[] = []
   const rows: Record<string, Mounted> = {}
   on('tool.call', async (_, e) => {
@@ -160,8 +160,10 @@ test('Clawd hops onto the row of each tool as it runs', async ($, on) => {
   expect(await pet(rows.b1)).toBe('( oops! Bash )')
 
   await turn($)
+  expect(await pet(rows.b1)).toBe('( done! +1.4k tokens )')
+  await clock.advance(6000)
   expect(await pet(rows.b1)).toBeUndefined()
-  expect(await pet(home)).toBe('( done! +1.4k tokens )')
+  expect(await home.find({ type: 'Text', text: /▐.███.▌/ })).toBeTruthy()
 })
 
 test('Clawd sits on the text box on desktop and watches the person type', async ($, on) => {
@@ -224,4 +226,17 @@ test('a question dialog gets Clawd on top', async ($, on) => {
   dialog = await site($, 'AskUserQuestion', 'q1', { tool: 'AskUserQuestion', questions: [] })
   await $.tool.call({ tool: 'AskUserQuestion', tool_use_id: 'q1', questions: [] } as never)
   expect(during).toBe('( your turn! )')
+})
+
+test('Clawd reads the desktop text box when no typing event comes', async ($, on) => {
+  const { clock } = engine(on, {})
+  let draft = ''
+  on('prompt.read', () => ({ value: { text: draft, cursor: draft.length } }) as never)
+  await start($)
+  const band = await site($, 'AbovePrompt', 'band', { hasSurvey: false, isWorking: false, maxRows: 10, bodyColumns: 80, scroll: { offset: 0, bodyRows: 10 }, viewport: { columns: 85, rows: 40 } }, 'desktop')
+  draft = 'thanks so much'
+  await clock.advance(700)
+  expect(await pet(band)).toBe('( ♥ )')
+  const svg = await band.find({ type: 'Svg' } as never) as { props?: { width?: number } } | undefined
+  expect(svg?.props?.width).toBe(72)
 })

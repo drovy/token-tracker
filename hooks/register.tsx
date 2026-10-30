@@ -233,6 +233,16 @@ async function watch($: EngineInterface, text: string, cursor: number) {
 
 let ticker: Timer | undefined
 let lastPick: string | undefined
+let lastDraft = ''
+
+// The desktop app's own text box sends no typing events: read the draft on
+// each tick and watch it when it changed.
+async function peek($: EngineInterface) {
+  const box = await $.prompt.read().catch(() => undefined)
+  if (!box || box.text === lastDraft) return
+  lastDraft = box.text
+  await watch($, box.text, box.cursor)
+}
 
 // A new mouse selection in the transcript: Clawd goes to sit on that row.
 async function follow($: EngineInterface) {
@@ -247,7 +257,11 @@ async function follow($: EngineInterface) {
 
 async function tick($: EngineInterface) {
   await follow($)
+  await peek($)
   const now = await $.clock.now()
+  const was = await read($, pet)
+  // Done on a row it was sent to: once the mood wears off, home to the text box.
+  if (FADES.includes(was.mood) && now - was.since > SETTLE && (await read($, spot)).site === 'row') await go($, { site: 'prompt' })
   await update($, pet, p => {
     const age = now - p.since
     const mood: Mood = FADES.includes(p.mood) && age > SETTLE ? 'idle'
@@ -327,23 +341,23 @@ function drawClawd($: EngineInterface, e: { surface: string }, look: Pose, small
     return <Box flexDirection="column">{rows.map(row => <Text color="claude">{row}</Text>)}</Box>
   }
   const { Svg } = $.ui.resolve(e as never) as unknown as { Svg: (props: object) => unknown }
-  const px = small ? 2 : PX
+  const px = small ? 3 : PX
   return <Svg source={clawdSvg(look, px)} alt={`Clawd${look.say ? `: ${look.say}` : ''}`} width={18 * px} height={7 * px} />
 }
 
 // Clawd and its speech bubble side by side, small enough for one line.
-function perch($: EngineInterface, e: { surface: string }, look: Pose) {
+function perch($: EngineInterface, e: { surface: string }, look: Pose, small = true) {
   const { Box, Text } = $.ui.resolve(e as never)
   return (
     <Box flexDirection="row" alignItems="center">
       {look.say && <Text color="subtle" wrap="truncate-end">( {look.say} ) </Text>}
-      {drawClawd($, e, look, true)}
+      {drawClawd($, e, look, small)}
     </Box>
   )
 }
 
-// Draws Clawd sitting on the top right of an engine row it was sent to,
-// painted over the row so nothing in it moves; any other row is left alone.
+// Draws Clawd sitting on top of an engine row it was sent to, at its right
+// end; any other row is left alone.
 async function sit($: EngineInterface, e: { surface: string; requestId: string }, next: (e: never) => Promise<unknown>, here = (at: Spot) => at.site === 'row' && at.id === e.requestId) {
   const at = await read($, spot)
   if (!here(at)) return next(e as never)
@@ -351,8 +365,8 @@ async function sit($: EngineInterface, e: { surface: string; requestId: string }
   const row = await next(e as never)
   return (
     <Box flexDirection="column">
+      <Box flexDirection="row" justifyContent="flex-end">{perch($, e, pose(await read($, pet)))}</Box>
       {row}
-      <Box position="absolute" top={0} right={1}>{perch($, e, pose(await read($, pet)))}</Box>
     </Box>
   )
 }
@@ -392,8 +406,14 @@ export const register: Register = (on, options) => {
   on('prompt.edit', async ($, e, next) => {
     const box = await next(e)
     const shown = box as { text?: string; cursor?: number }
-    if (typeof shown?.text === 'string') await watch($, shown.text, shown.cursor ?? shown.text.length)
+    if (typeof shown?.text === 'string') lastDraft = shown.text, await watch($, shown.text, shown.cursor ?? shown.text.length)
     return box
+  })
+
+  on('prompt.autocomplete', async ($, e, next) => {
+    lastDraft = e.text
+    await watch($, e.text, e.cursor).catch(() => {})
+    return next(e)
   })
 
   on('prompt.change', async ($, e, next) => {
@@ -440,7 +460,7 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     const usage = e.usage
-    await go($, { site: 'prompt' })
+    if ((await read($, spot)).site !== 'row') await go($, { site: 'prompt' })
     if (e.isAborted) await feel($, 'oops', 'stopped')
     else await feel($, 'happy', usage ? `+${fmt(usage.input_tokens + usage.output_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens)} tokens` : '')
     if (!usage) return result
@@ -506,7 +526,7 @@ export const register: Register = (on, options) => {
     const { Box } = $.ui.resolve(e)
     return (
       <Box flexDirection="row" justifyContent="flex-end" alignItems="flex-end">
-        {perch($, e, pose(await read($, pet)))}
+        {perch($, e, pose(await read($, pet)), false)}
       </Box>
     )
   })
