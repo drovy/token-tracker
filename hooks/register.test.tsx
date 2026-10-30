@@ -50,6 +50,12 @@ function engine(on: On, env: Record<string, string>, files: Record<string, strin
   }))
   on('session.start', (_, e) => ({ cwd: e.cwd }))
   on('turn.complete', () => ({ text: 'hi' }))
+  // Stands for the engine's own drawing of each row.
+  on('ui.render', ($, e) => {
+    if (e.component === 'AskUserQuestion') return { type: 'engine', ref: 0 } as never
+    const { Text } = $.ui.resolve(e)
+    return <Text>engine {e.component}</Text>
+  })
   return { opened, files, statuses, clock }
 }
 
@@ -116,55 +122,106 @@ test('usage shows in the status line before any turn or /tokens', async ($, on) 
   expect(statuses.at(-1)).toBe('$0.00 session · $1.50 all-time · 0 tokens')
 })
 
-const pet = async (ui: Awaited<ReturnType<Parameters<Parameters<typeof test>[1]>[0]['ui']['mount']>>) =>
+type Mounted = Awaited<ReturnType<Parameters<Parameters<typeof test>[1]>[0]['ui']['mount']>>
+type Kit = Parameters<Parameters<typeof test>[1]>[0]
+
+const pet = async (ui: Mounted) =>
   (await ui.find({ type: 'Text', text: /^\s*\( / }))?.text?.trim()
 
-test('Clawd acts out what Claude is doing', async ($, on) => {
+const site = ($: Kit, component: string, requestId: string, props: object, surface = 'terminal') =>
+  $.ui.mount({ plugin: 'token-tracker', component, requestId, surface, props } as never)
+
+const hint = ($: Kit, surface = 'terminal') =>
+  site($, 'PromptHint', 'hint', { isDraft: false, isWorking: false, hint: '? for shortcuts' }, surface)
+
+const toolRow = ($: Kit, id: string, tool: string) =>
+  site($, 'ToolUse', id, { tool, input: {}, isRunning: true, isErrored: false, isInterrupted: false, isExpanded: false })
+
+test('Clawd hops onto the row of each tool as it runs', async ($, on) => {
   engine(on, {})
   const seen: (string | undefined)[] = []
-  let ui: Awaited<ReturnType<typeof $.ui.mount>>
+  const rows: Record<string, Mounted> = {}
   on('tool.call', async (_, e) => {
-    seen.push(await pet(ui))
+    seen.push(await pet(rows[e.tool_use_id!]))
     return (e.tool === 'Bash' ? { deny: 'not allowed' } : { result: 'ok' }) as never
   })
   await start($)
-  ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  const home = await hint($)
+  expect(await home.find({ type: 'Text', text: /▐.███.▌/ })).toBeTruthy()
+  for (const [id, tool] of [['r1', 'Read'], ['e1', 'Edit'], ['b1', 'Bash']]) rows[id] = await toolRow($, id, tool)
 
-  await $.tool.call({ tool: 'Read', file_path: 'C:/proj/src/app.ts' } as never)
-  await $.tool.call({ tool: 'Edit', file_path: 'C:/proj/src/app.ts', old_string: 'a', new_string: 'b' } as never)
-  expect(await pet(ui)).toBe('( hmm. )')
-  await $.tool.call({ tool: 'Bash', command: 'npm test' } as never)
+  await $.tool.call({ tool: 'Read', tool_use_id: 'r1', file_path: 'C:/proj/src/app.ts' } as never)
+  await $.tool.call({ tool: 'Edit', tool_use_id: 'e1', file_path: 'C:/proj/src/app.ts', old_string: 'a', new_string: 'b' } as never)
+  expect(await pet(rows.e1)).toBe('( hmm. )')
+  expect(await pet(rows.r1)).toBeUndefined()
+  expect(await home.find({ type: 'Text', text: /▐.███.▌/ })).toBeFalsy()
+  await $.tool.call({ tool: 'Bash', tool_use_id: 'b1', command: 'npm test' } as never)
   expect(seen).toEqual(['( reading app.ts )', '( editing app.ts )', '( running npm test )'])
-  expect(await pet(ui)).toBe('( oops! Bash )')
+  expect(await pet(rows.b1)).toBe('( oops! Bash )')
 
   await turn($)
-  expect(await pet(ui)).toBe('( done! +1.4k tokens )')
-  await ui.unmount()
+  expect(await pet(rows.b1)).toBeUndefined()
+  expect(await pet(home)).toBe('( done! +1.4k tokens )')
 })
 
-test('petting Clawd makes it happy, then it settles and naps', async ($, on) => {
+test('Clawd watches the person type under the text box', async ($, on) => {
+  engine(on, {})
+  on('prompt.edit', (_, e) => {
+    const text = e.text.slice(0, e.start) + e.inputText + e.text.slice(e.end)
+    return { text, cursor: e.start + e.inputText.length } as never
+  })
+  await start($)
+  const home = await hint($, 'desktop')
+  const type = (text: string, inputText: string) =>
+    ($ as unknown as { prompt: { edit: (e: object) => Promise<unknown> } }).prompt.edit({
+      origin: { kind: 'person' }, text, cursor: text.length, start: text.length, end: text.length, inputText,
+    })
+  await type('', 'is this broken')
+  expect(await pet(home)).toBe('( uh oh… )')
+  await type('is this broken', '?')
+  expect(await pet(home)).toBe('( a question! )')
+  const svg = await home.find({ type: 'Svg' } as never) as { props?: { source?: string } } | undefined
+  expect(svg?.props?.source ?? '').toContain('#D97757')
+})
+
+test('selecting a message sends Clawd to sit on it', async ($, on) => {
+  const { clock } = engine(on, {})
+  let picked: object | undefined
+  on('ui.selection', () => ({ value: picked }) as never)
+  await start($)
+  const msg = await site($, 'AssistantMessage', 'm1', { text: 'hello', isFirstOfReply: true })
+  await clock.advance(700)
+  expect(await pet(msg)).toBeUndefined()
+  picked = { text: 'hello', requestId: 'm1' }
+  await clock.advance(700)
+  expect(await pet(msg)).toBe("( what's this? )")
+})
+
+test('clicking into the pane brings Clawd there to be petted, then it naps', async ($, on) => {
   const { clock } = engine(on, {})
   await start($)
   const ui = await $.ui.mount({ ...PANE, surface: 'terminal' })
+  expect(await pet(ui)).toBeUndefined()
+  await ui.press({ key: 'call-clawd' })
+  expect(await pet(ui)).toBe('( done! hi! )')
   await ui.press({ key: 'pet-clawd' })
   expect(await pet(ui)).toBe('( ♥ ♥ ♥ )')
   await clock.advance(6000)
   expect(await pet(ui)).toBeUndefined()
   await clock.advance(130_000)
   expect(await pet(ui)).toMatch(/^\( z/)
-  await ui.unmount()
 })
 
-test('Clawd sits above the text box as a picture', async ($, on) => {
+test('a question dialog gets Clawd on top', async ($, on) => {
   engine(on, {})
+  let dialog: Mounted | undefined
+  let during: string | undefined
+  on('tool.call', async () => {
+    during = await pet(dialog!)
+    return { result: 'ok' } as never
+  })
   await start($)
-  await turn($)
-  const ui = await $.ui.mount({
-    plugin: 'token-tracker', component: 'AbovePrompt', surface: 'desktop',
-    props: { hasSurvey: false, isWorking: false, maxRows: 10, scroll: { offset: 0, bodyRows: 10 } },
-  } as never)
-  const svg = await ui.find({ type: 'Svg' } as never) as { props?: { source?: string } } | undefined
-  expect(svg?.props?.source ?? '').toContain('#D97757')
-  expect(await pet(ui)).toBe('( done! +1.4k tokens )')
-  await ui.unmount()
+  dialog = await site($, 'AskUserQuestion', 'q1', { tool: 'AskUserQuestion', questions: [] })
+  await $.tool.call({ tool: 'AskUserQuestion', tool_use_id: 'q1', questions: [] } as never)
+  expect(during).toBe('( your turn! )')
 })

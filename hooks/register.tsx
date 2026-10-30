@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, Timer, TurnUsage } from 'claude-code'
 
-import type { Mood, Pet, SessionTally, SyncInfo, Tally } from '../types'
+import type { Mood, Pet, SessionTally, Spot, SyncInfo, Tally } from '../types'
 
 const PANE = 'token-tracker'
 const MAX_SESSIONS = 500
@@ -26,6 +26,7 @@ const recent = atom({ plugin: 'token-tracker', key: 'recent' } as const, [], { s
 const sync = atom({ plugin: 'token-tracker', key: 'sync' } as const, null, { shape: 'sync-1' })
 const pet = atom({ plugin: 'token-tracker', key: 'pet' } as const,
   { mood: 'idle', note: '', since: 0, frame: 0, steps: 0 } as Pet, { shape: 'pet-1' })
+const spot = atom({ plugin: 'token-tracker', key: 'spot' } as const, { site: 'prompt' } as Spot, { shape: 'spot-1' })
 
 const PARTS = [
   { field: 'input', costField: 'costInput', label: 'Input', color: 'claude' },
@@ -174,8 +175,11 @@ async function load($: EngineInterface) {
   await refresh($)
 }
 
-// Clawd, the Claude crab, lives at the top of the pane and acts out what
-// Claude is doing. One timer moves the animation on and lets moods wear off.
+// Clawd, the Claude crab, acts out what Claude is doing and goes where the
+// action is: the line under the text box while the person types, the row of
+// the tool that is running, a row the person selects, a question dialog, or
+// the pane once it is clicked. One timer moves the animation on, lets moods
+// wear off and watches the mouse selection.
 const TICK = 600
 const SETTLE = 5000
 const DOZE = 120_000
@@ -189,7 +193,7 @@ const TOOLS: [RegExp, Mood][] = [
   [/^AskUserQuestion$/, 'asking'],
 ]
 const WALKS: Mood[] = ['running', 'browsing', 'happy']
-const FADES: Mood[] = ['happy', 'oops', 'loved']
+const FADES: Mood[] = ['happy', 'oops', 'loved', 'curious']
 
 const short = (s: string, n = 22) => (s.length > n ? `${s.slice(0, n - 1)}…` : s)
 
@@ -204,14 +208,45 @@ function about(e: Record<string, unknown>): string {
   return ''
 }
 
-async function feel($: EngineInterface, mood: Mood, note = '') {
+async function feel($: EngineInterface, mood: Mood, note = '', gaze?: Pet['gaze']) {
   const since = await $.clock.now()
-  await update($, pet, p => ({ ...p, mood, note, since }))
+  await update($, pet, p => ({ ...p, mood, note, since, gaze }))
+}
+
+const go = ($: EngineInterface, to: Spot) =>
+  update($, spot, at => (at.site === to.site && at.id === to.id ? at : to))
+
+// The person typing: Clawd hurries to the text box and follows the cursor.
+async function watch($: EngineInterface, text: string, cursor: number) {
+  await go($, { site: 'prompt' })
+  if (!text.trim()) return feel($, 'idle')
+  const say = /\?\s*$/.test(text) ? 'a question!'
+    : text.length > 400 ? "that's a lot!"
+    : /\b(bug|error|broken|fix)\b/i.test(text) ? 'uh oh…'
+    : /\b(thanks|thank you|nice|great|love)\b/i.test(text) ? '♥'
+    : ''
+  const gaze = cursor < text.length / 2 ? 'left' : 'right'
+  const now = await read($, pet)
+  if (now.mood === 'watching' && now.note === say && now.gaze === gaze) return
+  await feel($, 'watching', say, gaze)
 }
 
 let ticker: Timer | undefined
+let lastPick: string | undefined
+
+// A new mouse selection in the transcript: Clawd goes to sit on that row.
+async function follow($: EngineInterface) {
+  const picked = await $.ui.selection().catch(() => undefined)
+  const key = picked?.requestId ? `${picked.requestId}:${picked.text}` : undefined
+  if (key === lastPick) return
+  lastPick = key
+  if (!picked?.requestId) return
+  await go($, { site: 'row', id: picked.requestId })
+  await feel($, 'curious')
+}
 
 async function tick($: EngineInterface) {
+  await follow($)
   const now = await $.clock.now()
   await update($, pet, p => {
     const age = now - p.since
@@ -228,7 +263,7 @@ async function tick($: EngineInterface) {
   })
 }
 
-const EYES = { open: ' ▐▛███▜▌ ', shut: ' ▐█████▌ ' }
+const EYES = { open: ' ▐▛███▜▌ ', shut: ' ▐█████▌ ', left: ' ▐▛███▜▌ ', right: ' ▐▛███▜▌ ' }
 const ARMS = { down: '▝▜█████▛▘', up: '▗▟█████▙▖' }
 const LEGS = ['  ▘▘ ▝▝  ', '  ▝▘ ▘▝  ']
 
@@ -242,6 +277,8 @@ function pose(p: Pet) {
   const look = (eyes: keyof typeof EYES, arms: keyof typeof ARMS, legs: number, say: string) =>
     ({ eyes, arms, legs, rows: [EYES[eyes], ARMS[arms], LEGS[legs]], say })
   switch (p.mood) {
+    case 'watching': return look(blink ? 'shut' : p.gaze ?? 'open', 'down', 0, p.note)
+    case 'curious': return look(p.frame % 3 === 0 ? 'left' : 'right', 'up', 0, "what's this?")
     case 'thinking': return look(blink ? 'shut' : 'open', 'down', 0, `hmm${dots}`)
     case 'reading': return look(blink ? 'shut' : 'open', 'down', 0, `reading${note}`)
     case 'editing': return look('open', flip ? 'up' : 'down', 0, `editing${note}`)
@@ -266,28 +303,58 @@ const ORANGE = '#D97757'
 const EYE = '#1F1E1D'
 const PX = 4
 
-function clawdSvg(look: Pose) {
+function clawdSvg(look: Pose, px = PX) {
   const r = (x: number, y: number, w: number, h: number, fill = ORANGE) =>
     `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}"/>`
   const armY = look.arms === 'up' ? 0 : 2
   const legs = look.legs === 0 ? [2, 2, 2, 2] : [2, 1, 2, 1]
-  const eyes = look.eyes === 'open'
-    ? r(5, 1, 1, 2, EYE) + r(12, 1, 1, 2, EYE)
-    : r(4.5, 2, 2, 0.5, EYE) + r(11.5, 2, 2, 0.5, EYE)
-  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 7" width="${18 * PX}" height="${7 * PX}" shape-rendering="crispEdges">`
+  const shift = { open: 0, left: -1, right: 1, shut: 0 }[look.eyes]
+  const eyes = look.eyes === 'shut'
+    ? r(4.5, 2, 2, 0.5, EYE) + r(11.5, 2, 2, 0.5, EYE)
+    : r(5 + shift, 1, 1, 2, EYE) + r(12 + shift, 1, 1, 2, EYE)
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 7" width="${18 * px}" height="${7 * px}" shape-rendering="crispEdges">`
     + r(3, 0, 12, 5) + r(1, armY, 2, 2) + r(15, armY, 2, 2)
     + [4, 6, 11, 13].map((x, i) => r(x, 5, 1, legs[i])).join('')
     + eyes + '</svg>'
 }
 
 // The picture where the surface draws images, the block glyphs in a terminal.
-function drawClawd($: EngineInterface, e: { surface: string }, look: Pose) {
+// Small is one row tall, to perch on a line without moving it.
+function drawClawd($: EngineInterface, e: { surface: string }, look: Pose, small = false) {
   if (e.surface === 'terminal') {
     const { Box, Text } = $.ui.resolve(e as never)
-    return <Box flexDirection="column">{look.rows.map(row => <Text color="claude">{row}</Text>)}</Box>
+    const rows = small ? [look.rows[0].trim()] : look.rows
+    return <Box flexDirection="column">{rows.map(row => <Text color="claude">{row}</Text>)}</Box>
   }
   const { Svg } = $.ui.resolve(e as never) as unknown as { Svg: (props: object) => unknown }
-  return <Svg source={clawdSvg(look)} alt={`Clawd${look.say ? `: ${look.say}` : ''}`} width={18 * PX} height={7 * PX} />
+  const px = small ? 2 : PX
+  return <Svg source={clawdSvg(look, px)} alt={`Clawd${look.say ? `: ${look.say}` : ''}`} width={18 * px} height={7 * px} />
+}
+
+// Clawd and its speech bubble side by side, small enough for one line.
+function perch($: EngineInterface, e: { surface: string }, look: Pose) {
+  const { Box, Text } = $.ui.resolve(e as never)
+  return (
+    <Box flexDirection="row" alignItems="center">
+      {look.say && <Text color="subtle" wrap="truncate-end">( {look.say} ) </Text>}
+      {drawClawd($, e, look, true)}
+    </Box>
+  )
+}
+
+// Draws Clawd sitting on the top right of an engine row it was sent to,
+// painted over the row so nothing in it moves; any other row is left alone.
+async function sit($: EngineInterface, e: { surface: string; requestId: string }, next: (e: never) => Promise<unknown>, here = (at: Spot) => at.site === 'row' && at.id === e.requestId) {
+  const at = await read($, spot)
+  if (!here(at)) return next(e as never)
+  const { Box } = $.ui.resolve(e as never)
+  const row = await next(e as never)
+  return (
+    <Box flexDirection="column">
+      {row}
+      <Box position="absolute" top={0} right={1}>{perch($, e, pose(await read($, pet)))}</Box>
+    </Box>
+  )
 }
 
 // Back and forth across the pane: a step count folded into 0…room.
@@ -309,6 +376,7 @@ export const register: Register = (on, options) => {
     await load($)
     ticker?.cancel()
     ticker = $.clock.every(TICK, () => void tick($))
+    lastPick = undefined
 
     return next(e)
   })
@@ -321,12 +389,41 @@ export const register: Register = (on, options) => {
     return next(e)
   })
 
+  on('prompt.edit', async ($, e, next) => {
+    const box = await next(e)
+    const shown = box as { text?: string; cursor?: number }
+    if (typeof shown?.text === 'string') await watch($, shown.text, shown.cursor ?? shown.text.length)
+    return box
+  })
+
+  on('prompt.change', async ($, e, next) => {
+    const box = e as unknown as { text?: string; cursor?: number }
+    if (typeof box.text === 'string') await watch($, box.text, box.cursor ?? box.text.length)
+    return next(e)
+  })
+
+  on('prompt.submit', async ($, e, next) => {
+    await go($, { site: 'prompt' })
+    await feel($, 'thinking')
+    return next(e)
+  })
+
+  on('ui.focus', { component: 'Pane', requestId: PANE }, async ($, e, next) => {
+    await go($, { site: 'pane' })
+    await feel($, 'curious')
+    return next(e)
+  })
+
   on('tool.call', async ($, e, next) => {
     const mood = TOOLS.find(([match]) => match.test(e.tool))?.[1] ?? 'tinkering'
-    await feel($, mood, mood === 'tinkering' ? short(e.tool.replace(/^mcp__[^_]+__/, '')) : about(e as never))
+    // Clawd's part never stands in the way of the call itself.
+    await (async () => {
+      if (e.tool_use_id && !e.agentId) await go($, { site: mood === 'asking' ? 'question' : 'row', id: e.tool_use_id })
+      await feel($, mood, mood === 'tinkering' ? short(e.tool.replace(/^mcp__[^_]+__/, '')) : about(e as never))
+    })().catch(() => {})
     const result = await next(e)
-    if (result.deny !== undefined || result.isError) await feel($, 'oops', short(e.tool))
-    else if (mood !== 'asking') await feel($, 'thinking')
+    if (result.deny !== undefined || result.isError) await feel($, 'oops', short(e.tool)).catch(() => {})
+    else if (mood !== 'asking') await feel($, 'thinking').catch(() => {})
     return result
   })
 
@@ -343,6 +440,7 @@ export const register: Register = (on, options) => {
   on('turn.complete', async ($, e, next) => {
     const result = await next(e)
     const usage = e.usage
+    await go($, { site: 'prompt' })
     if (e.isAborted) await feel($, 'oops', 'stopped')
     else await feel($, 'happy', usage ? `+${fmt(usage.input_tokens + usage.output_tokens + usage.cache_read_input_tokens + usage.cache_creation_input_tokens)} tokens` : '')
     if (!usage) return result
@@ -388,18 +486,38 @@ export const register: Register = (on, options) => {
     }
   })
 
-  // Clawd sits just above the text box too, saying what Claude is up to.
-  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
-    if (e.props.hasSurvey) return next(e)
-    const { Box, Text, Button } = $.ui.resolve(e)
-    const look = pose(await read($, pet))
+  // Clawd's home: the hint line right under the text box.
+  on('ui.render', { component: 'PromptHint' }, async ($, e, next) => {
+    if ((await read($, spot)).site !== 'prompt') return next(e)
+    const { Box } = $.ui.resolve(e)
+    const line = await next(e)
     return (
-      <Box flexDirection="row" alignItems="center" justifyContent="space-between">
-        <Box flexDirection="row" alignItems="center">
-          {drawClawd($, e, look)}
-          {look.say && <Text color="subtle" wrap="truncate-end"> ( {look.say} )</Text>}
-        </Box>
-        <Button key="pet-clawd" plain label="pet" onPress={() => void feel($, 'loved')} />
+      <Box flexDirection="row" justifyContent="space-between" alignItems="center">
+        <Box flexGrow={1}>{line as never}</Box>
+        {perch($, e, pose(await read($, pet)))}
+      </Box>
+    )
+  })
+
+  on('ui.render', { component: 'UserMessage' }, ($, e, next) => sit($, e, next as never))
+  on('ui.render', { component: 'AssistantMessage' }, ($, e, next) => sit($, e, next as never))
+  on('ui.render', { component: 'CommandOutput' }, ($, e, next) => sit($, e, next as never))
+  on('ui.render', { component: 'ToolUse' }, ($, e, next) => sit($, e, next as never))
+  // Calls folded into a group have no row of their own: sit on the group.
+  on('ui.render', { component: 'ToolGroup' }, ($, e, next) => sit($, e, next as never,
+    at => at.site === 'row' && !e.props.isExpanded && e.props.calls.some(c => c.tool_use_id === at.id)))
+
+  // A question for the person: Clawd sits on top of the dialog.
+  on('ui.render', { component: 'AskUserQuestion' }, async ($, e, next) => {
+    const at = await read($, spot)
+    if (at.site !== 'question' || at.id !== e.requestId) return next(e)
+    const { Box } = $.ui.resolve(e)
+    const look = pose(await read($, pet))
+    const dialog = await next(e)
+    return (
+      <Box flexDirection="column">
+        {perch($, e, look)}
+        {dialog as never}
       </Box>
     )
   })
@@ -408,6 +526,7 @@ export const register: Register = (on, options) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const s = await read($, session)
     const clawd = await read($, pet)
+    const at = await read($, spot)
     const t = await read($, total)
     const list = await read($, recent)
     const synced = await read($, sync)
@@ -462,7 +581,11 @@ export const register: Register = (on, options) => {
 
     const look = pose(clawd)
     const x = pace(clawd.steps, Math.max(0, (e.props.bodyColumns ?? 40) - 14 - (look.say ? look.say.length + 4 : 0)))
-    const home = (
+    const home = at.site !== 'pane' ? (
+      <Box key="pet" flexDirection="row" marginBottom={1}>
+        <Button key="call-clawd" plain label="call Clawd here" onPress={async () => { await go($, { site: 'pane' }); await feel($, 'happy', 'hi!') }} />
+      </Box>
+    ) : (
       <Box key="pet" flexDirection="column" marginBottom={1}>
         <Box flexDirection="row" alignItems="center" marginLeft={x}>
           {drawClawd($, e, look)}

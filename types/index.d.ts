@@ -27,6 +27,7 @@ export type SyncInfo = {
 export type Mood =
   | 'idle' | 'thinking' | 'reading' | 'editing' | 'running' | 'browsing'
   | 'helpers' | 'asking' | 'tinkering' | 'oops' | 'happy' | 'loved' | 'sleepy'
+  | 'watching' | 'curious'
 
 export type Pet = {
   mood: Mood
@@ -34,6 +35,14 @@ export type Pet = {
   since: number
   frame: number
   steps: number
+  gaze?: 'left' | 'right'
+}
+
+// Where Clawd sits: under the text box, on a transcript row (a message id or
+// tool_use_id), on a question dialog, or in the pane.
+export type Spot = {
+  site: 'prompt' | 'row' | 'question' | 'pane'
+  id?: string
 }
 
 declare module 'claude-code' {
@@ -44,6 +53,7 @@ declare module 'claude-code' {
       recent: Shaped<SessionTally[]>
       sync: Shaped<SyncInfo | null>
       pet: Shaped<Pet>
+      spot: Shaped<Spot>
     }
   }
 }
