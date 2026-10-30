@@ -240,7 +240,7 @@ function pose(p: Pet) {
   const dots = '.'.repeat((f % 3) + 1)
   const note = p.note ? ` ${p.note}` : ''
   const look = (eyes: keyof typeof EYES, arms: keyof typeof ARMS, legs: number, say: string) =>
-    ({ rows: [EYES[eyes], ARMS[arms], LEGS[legs]], say })
+    ({ eyes, arms, legs, rows: [EYES[eyes], ARMS[arms], LEGS[legs]], say })
   switch (p.mood) {
     case 'thinking': return look(blink ? 'shut' : 'open', 'down', 0, `hmm${dots}`)
     case 'reading': return look(blink ? 'shut' : 'open', 'down', 0, `reading${note}`)
@@ -256,6 +256,38 @@ function pose(p: Pet) {
     case 'sleepy': return look('shut', 'down', 0, ['z', 'zZ', 'zZz'][f % 3])
     default: return look(blink ? 'shut' : 'open', 'down', 0, '')
   }
+}
+
+type Pose = ReturnType<typeof pose>
+
+// Clawd as pixel art, for the surfaces that draw images: the square orange
+// body, two dark eyes, a nub of an arm each side and four little legs.
+const ORANGE = '#D97757'
+const EYE = '#1F1E1D'
+const PX = 4
+
+function clawdSvg(look: Pose) {
+  const r = (x: number, y: number, w: number, h: number, fill = ORANGE) =>
+    `<rect x="${x}" y="${y}" width="${w}" height="${h}" fill="${fill}"/>`
+  const armY = look.arms === 'up' ? 0 : 2
+  const legs = look.legs === 0 ? [2, 2, 2, 2] : [2, 1, 2, 1]
+  const eyes = look.eyes === 'open'
+    ? r(5, 1, 1, 2, EYE) + r(12, 1, 1, 2, EYE)
+    : r(4.5, 2, 2, 0.5, EYE) + r(11.5, 2, 2, 0.5, EYE)
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 18 7" width="${18 * PX}" height="${7 * PX}" shape-rendering="crispEdges">`
+    + r(3, 0, 12, 5) + r(1, armY, 2, 2) + r(15, armY, 2, 2)
+    + [4, 6, 11, 13].map((x, i) => r(x, 5, 1, legs[i])).join('')
+    + eyes + '</svg>'
+}
+
+// The picture where the surface draws images, the block glyphs in a terminal.
+function drawClawd($: EngineInterface, e: { surface: string }, look: Pose) {
+  if (e.surface === 'terminal') {
+    const { Box, Text } = $.ui.resolve(e as never)
+    return <Box flexDirection="column">{look.rows.map(row => <Text color="claude">{row}</Text>)}</Box>
+  }
+  const { Svg } = $.ui.resolve(e as never) as unknown as { Svg: (props: object) => unknown }
+  return <Svg source={clawdSvg(look)} alt={`Clawd${look.say ? `: ${look.say}` : ''}`} width={18 * PX} height={7 * PX} />
 }
 
 // Back and forth across the pane: a step count folded into 0…room.
@@ -356,6 +388,22 @@ export const register: Register = (on, options) => {
     }
   })
 
+  // Clawd sits just above the text box too, saying what Claude is up to.
+  on('ui.render', { component: 'AbovePrompt' }, async ($, e, next) => {
+    if (e.props.hasSurvey) return next(e)
+    const { Box, Text, Button } = $.ui.resolve(e)
+    const look = pose(await read($, pet))
+    return (
+      <Box flexDirection="row" alignItems="center" justifyContent="space-between">
+        <Box flexDirection="row" alignItems="center">
+          {drawClawd($, e, look)}
+          {look.say && <Text color="subtle" wrap="truncate-end"> ( {look.say} )</Text>}
+        </Box>
+        <Button key="pet-clawd" plain label="pet" onPress={() => void feel($, 'loved')} />
+      </Box>
+    )
+  })
+
   on('ui.render', { component: 'Pane', requestId: PANE }, async ($, e) => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const s = await read($, session)
@@ -413,11 +461,13 @@ export const register: Register = (on, options) => {
     }
 
     const look = pose(clawd)
-    const x = pace(clawd.steps, Math.max(0, (e.props.bodyColumns ?? 40) - 12))
+    const x = pace(clawd.steps, Math.max(0, (e.props.bodyColumns ?? 40) - 14 - (look.say ? look.say.length + 4 : 0)))
     const home = (
       <Box key="pet" flexDirection="column" marginBottom={1}>
-        <Text color="subtle" wrap="truncate-end">{look.say ? `${' '.repeat(Math.max(0, x - 1))}( ${look.say} )` : ' '}</Text>
-        {look.rows.map(row => <Text color="claude">{' '.repeat(x)}{row}</Text>)}
+        <Box flexDirection="row" alignItems="center" marginLeft={x}>
+          {drawClawd($, e, look)}
+          {look.say && <Text color="subtle" wrap="truncate-end"> ( {look.say} )</Text>}
+        </Box>
         <Button key="pet-clawd" plain label="pet Clawd" onPress={() => void feel($, 'loved')} />
       </Box>
     )

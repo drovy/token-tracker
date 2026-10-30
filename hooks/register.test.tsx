@@ -154,3 +154,17 @@ test('petting Clawd makes it happy, then it settles and naps', async ($, on) => 
   expect(await pet(ui)).toMatch(/^\( z/)
   await ui.unmount()
 })
+
+test('Clawd sits above the text box as a picture', async ($, on) => {
+  engine(on, {})
+  await start($)
+  await turn($)
+  const ui = await $.ui.mount({
+    plugin: 'token-tracker', component: 'AbovePrompt', surface: 'desktop',
+    props: { hasSurvey: false, isWorking: false, maxRows: 10, scroll: { offset: 0, bodyRows: 10 } },
+  } as never)
+  const svg = await ui.find({ type: 'Svg' } as never) as { props?: { source?: string } } | undefined
+  expect(svg?.props?.source ?? '').toContain('#D97757')
+  expect(await pet(ui)).toBe('( done! +1.4k tokens )')
+  await ui.unmount()
+})
