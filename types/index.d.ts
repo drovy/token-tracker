@@ -18,12 +18,19 @@ export type SessionTally = Tally & {
   updatedAt: number
 }
 
+export type SyncInfo = {
+  folder: string
+  devices: string[]
+  error?: string
+}
+
 declare module 'claude-code' {
   interface PluginState {
     'token-tracker': {
       session: Shaped<SessionTally | null>
       total: Shaped<Tally>
       recent: Shaped<SessionTally[]>
+      sync: Shaped<SyncInfo | null>
     }
   }
 }

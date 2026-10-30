@@ -1,7 +1,7 @@
 import { atom, read, update } from 'claude-code'
 import type { EngineInterface, Register, TurnUsage } from 'claude-code'
 
-import type { SessionTally, Tally } from '../types'
+import type { SessionTally, SyncInfo, Tally } from '../types'
 
 const PANE = 'token-tracker'
 const MAX_SESSIONS = 500
@@ -23,6 +23,7 @@ const RATES: { match: string; rate: [number, number, number, number] }[] = [
 const session = atom({ plugin: 'token-tracker', key: 'session' } as const, null, { shape: 'tally-1' })
 const total = atom({ plugin: 'token-tracker', key: 'total' } as const, EMPTY, { shape: 'tally-1' })
 const recent = atom({ plugin: 'token-tracker', key: 'recent' } as const, [], { shape: 'tally-1' })
+const sync = atom({ plugin: 'token-tracker', key: 'sync' } as const, null, { shape: 'sync-1' })
 
 const PARTS = [
   { field: 'input', costField: 'costInput', label: 'Input', color: 'claude' },
@@ -77,6 +78,87 @@ async function refresh($: EngineInterface) {
   $.ui.status(`${usd(s ? cost(s) : 0)} session · ${usd(cost(t))} all-time · ${fmt(s ? sum(s) : 0)} tokens`)
 }
 
+type DeviceFile = { device: string; updatedAt: number; total: Tally; sessions: SessionTally[] }
+
+let syncSetting = ''
+
+// The folder each computer writes its own totals file to. Defaults to one in
+// OneDrive, which is the same folder on every PC signed in to that account.
+async function syncFolder($: EngineInterface): Promise<string | undefined> {
+  const set = syncSetting.trim()
+  if (set.toLowerCase() === 'off') return undefined
+  if (set) return set.replace(/[\\/]+$/, '')
+  const oneDrive = await $.env.get('OneDrive')
+  return oneDrive ? `${oneDrive}/Claude/token-tracker` : undefined
+}
+
+// This computer's id, made once and kept, so its file keeps the same name.
+async function device($: EngineInterface): Promise<{ id: string; name: string }> {
+  const kept = (await $.store.get('device')) as { id: string; name: string } | undefined
+  if (kept?.id) return kept
+  const name = (await $.env.get('COMPUTERNAME')) || (await $.env.get('HOSTNAME')) || 'device'
+  const id = `${name.replace(/[^A-Za-z0-9_-]/g, '')}-${Math.random().toString(36).slice(2, 8)}`
+  await $.store.set('device', { id, name })
+  return { id, name }
+}
+
+const plus = (a: Tally, b: Tally): Tally => ({
+  input: a.input + b.input,
+  output: a.output + b.output,
+  cacheRead: a.cacheRead + b.cacheRead,
+  cacheWrite: a.cacheWrite + b.cacheWrite,
+  turns: a.turns + b.turns,
+  costInput: a.costInput + b.costInput,
+  costOutput: a.costOutput + b.costOutput,
+  costCacheRead: a.costCacheRead + b.costCacheRead,
+  costCacheWrite: a.costCacheWrite + b.costCacheWrite,
+  unpriced: a.unpriced + b.unpriced,
+})
+
+const newest = (list: SessionTally[]) =>
+  [...list].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 20)
+
+// Writes this computer's totals to the sync folder, then adds every other
+// computer's file to them. A folder that can't be reached leaves this
+// computer's own numbers, with the error to show.
+async function combine(
+  $: EngineInterface, own: Tally, sessions: Record<string, SessionTally>,
+): Promise<{ total: Tally; recent: SessionTally[]; info: SyncInfo | null }> {
+  const mine = Object.values(sessions)
+  const folder = await syncFolder($)
+  if (!folder) return { total: own, recent: newest(mine), info: null }
+
+  const me = await device($)
+  let sum = asTally(own)
+  let all = mine
+  const devices = [me.name]
+  try {
+    const file: DeviceFile = { device: me.name, updatedAt: await $.clock.now(), total: own, sessions: newest(mine) }
+    await $.fs.write(`${folder}/${me.id}.json`, JSON.stringify(file))
+    for (const entry of await $.fs.list(folder)) {
+      if (entry.kind !== 'file' || !entry.name.endsWith('.json') || entry.name === `${me.id}.json`) continue
+      try {
+        const other = JSON.parse(await $.fs.read(`${folder}/${entry.name}`)) as DeviceFile
+        sum = plus(sum, asTally(other.total))
+        all = all.concat((other.sessions ?? []).map(one => ({ ...EMPTY, ...one })))
+        devices.push(other.device || entry.name.replace(/\.json$/, ''))
+      } catch {
+        // A file still syncing, or not one of ours: skip it this time.
+      }
+    }
+    return { total: sum, recent: newest(all), info: { folder, devices } }
+  } catch (err) {
+    return { total: own, recent: newest(mine), info: { folder, devices, error: String((err as Error)?.message ?? err) } }
+  }
+}
+
+async function show($: EngineInterface, own: Tally, sessions: Record<string, SessionTally>) {
+  const c = await combine($, own, sessions)
+  await update($, total, () => c.total)
+  await update($, recent, () => c.recent)
+  await update($, sync, () => c.info)
+}
+
 // Loads persisted totals and this session's entry (if resumed) into state.
 async function load($: EngineInterface) {
   const id = await $.session.id()
@@ -86,19 +168,19 @@ async function load($: EngineInterface) {
     ...EMPTY, id, cwd: await $.session.cwd(), startedAt: now, updatedAt: now,
   }
   await update($, session, () => mine)
-  const storedTotal = asTally(await $.store.get('total'))
-  await update($, total, () => storedTotal)
-  await update($, recent, () =>
-    Object.values(sessions).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 20))
+  await show($, asTally(await $.store.get('total')), sessions)
   await refresh($)
 }
 
-export const register: Register = on => {
+export const register: Register = (on, options) => {
+  syncSetting = typeof options.syncFolder === 'string' ? options.syncFolder : ''
+
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'tokens',
       description: 'Show token usage for this session and all time',
     })
+    void $.ui.open({ id: PANE, title: 'Token usage' })
     await load($)
 
     return next(e)
@@ -150,9 +232,7 @@ export const register: Register = on => {
     await $.store.set('total', newTotal)
 
     await update($, session, () => mine)
-    await update($, total, () => newTotal)
-    await update($, recent, () =>
-      Object.values(sessions).sort((a, b) => b.updatedAt - a.updatedAt).slice(0, 20))
+    await show($, newTotal, sessions)
     await refresh($)
 
     return result
@@ -174,6 +254,7 @@ export const register: Register = on => {
     const s = await read($, session)
     const t = await read($, total)
     const list = await read($, recent)
+    const synced = await read($, sync)
     const barWidth = Math.max(10, (e.props.bodyColumns ?? 40) - 6)
 
     // A rounded, Claude-orange bordered bubble.
@@ -226,7 +307,7 @@ export const register: Register = on => {
     return (
       <Box flexDirection="column">
         {tally('session', 'This session', s ?? EMPTY)}
-        {tally('total', 'All time', t)}
+        {tally('total', synced && synced.devices.length > 1 ? `All time · ${synced.devices.length} computers` : 'All time', t)}
         {card('recent', 'Recent sessions', (
           <Box flexDirection="column">
             {list.length === 0 && <Text color="subtle">None yet.</Text>}
@@ -243,6 +324,11 @@ export const register: Register = on => {
             })}
           </Box>
         ))}
+        {synced?.error
+          ? <Text color="warning" wrap="wrap">Can't sync with {synced.folder}: {synced.error}</Text>
+          : synced
+            ? <Text color="subtle" wrap="wrap">Synced through {synced.folder} ({synced.devices.join(', ')})</Text>
+            : <Text color="subtle" wrap="wrap">Not syncing: set a sync folder in the mod's settings to share totals between computers.</Text>}
         <Text color="subtle" wrap="wrap">
           API list prices with 5-minute cache writes. A subscription isn't billed per token, so this is what the same use would cost on the API. Cost counts from when this version was installed.
         </Text>
